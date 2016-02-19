@@ -369,6 +369,24 @@ like ``pip install -e`` cannot (currently) be used for a project taking
 advantage of this PEP.
 
 
+How do I support Incremental or Cached Builds?
+----------------------------------------------
+
+Building a project is a non-trivial task in many cases and this process can
+sometimes take a *very* long time to actually complete. While this PEP assumes
+that by default, projects will be built fresh each time, it can be used in a
+way that supports incremental and cached building.
+
+All of the pipeline API functions accept an optional, ``build_dir`` parameter
+and if provided the build tool should use that to build the project in. If a
+user wishes to enable incremental or cached building, they can pass in a set
+build directory to that command and reuse that directory between invocation.
+The build system can than reuse any still valid files from within that build
+directory instead of having to recompute them.
+
+This may look something like: ``pip install --build-dir ./build/ .``.
+
+
 Rejected Proposals
 ==================
 
