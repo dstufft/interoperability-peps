@@ -15,7 +15,7 @@ Abstract
 ========
 
 This PEP defines a "Source Wheel" distribution. A "Source Wheel" is a ZIP
-format archive with a specially formatted file name and the .src.whl extension.
+format archive with a specially formatted file name and the .swhl extension.
 This is a successor to the sdist format produced by distutils and setuptools.
 
 
@@ -60,6 +60,15 @@ Details
     It's important to note here that the metadata in DIST-INFO is a *subset* of
     what is available to a wheel. We need to sort out exactly what subset is
     acceptable, but once we figure that out we should encode that here.
+
+    It's possible that ``pypa.toml`` could instead be something like
+    ``pypa.json``. The desire to use ``TOML`` when this file is human editable
+    is no longer a concern here, and it is potentionally nice to allow projects
+    to consume source wheels without needing to have a ``TOML`` implementation
+    available. Of course this would make it somewhat more complicated for
+    tooling because they would not be able to rely on their being a single
+    represenatation of the data on disk, but it's not really much harder to
+    have an if statement for ``toml.loads`` vs ``json.loads``.
 
 
 Frequently Asked Questions

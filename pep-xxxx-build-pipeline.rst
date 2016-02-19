@@ -34,8 +34,8 @@ still the case that there is an implicit assumption that when we're installing
 from either a sdist or a arbitrary directory that distutils/setuptools is being
 used.
 
-An implicit, hard dependecy on distutils/setuptools has been problematic for a
-number of reasons:
+An implicit, hard dependecy on distutils/setuptools is problematic for a number
+of reasons:
 
 * The needs of a simple, pure python project are vastly different than the
   needs of a complex project like Numpy which needs to build against several
@@ -69,13 +69,14 @@ packages must be able to go through, as::
     VCS/Arbitrary Directory -> Source Distribution -> Wheel -> Installed
                             \-> Editable Install
 
-This represents a departure from the previous "pipeline" which aillowed::
+This represents a departure from the previous "pipeline" which allowed::
 
     VCS/Arbitrary Directory -> Source Distribution -> Wheel -> Installed
                                                    \-> Installed
                             \-> Wheel -> Installed
                             \-> Installed
                             \-> Editable Install
+
 
 Build Pipeline API
 ------------------
@@ -91,110 +92,173 @@ This PEP chooses the TOML file format due to the fact it is easily readable and
 writable by humans, but it still maintains sane parsing and real datatypes. An
 example of this file is::
 
-    [source]
-    command = "mybuildtool.build.source"
+    [build]
+    builder = "mybuildtool"
     dependencies = [
-        "mybuildtool",
+      "mybuildtool",
     ]
 
-    [build]
-    command = "mybuildtool.build.wheel"
-    dependencies = [
-        "mybuildtool",
-    ]
+
+API Entrypoint
+~~~~~~~~~~~~~~
+
+The entrypoint to the pipeline API is defined using a key ``builder`` inside of
+the ``build`` table in ``pypa.toml``. The value of this key is a string using
+the format ``path.to.import:object.to.use``. This string can be resolved to an
+object or module using a functional equivalent to::
+
+  import path.to.import
+  builder = path.to.import.object.to.use
+
+The ``:object.to.use`` portion may be omitted, in which case it is functionally
+equivalent to::
+
+  import path.to.import
+  builder = path.to.import
+
+Each of the functions defined as part of the pipeline API must be an attribute
+of the final resolved object or module.
 
 
 Source Wheel Creation
 ~~~~~~~~~~~~~~~~~~~~~
 
-The source wheel creation is configured by specifying a command that will be
-executed using ``python -m {command}``. Using the above example, the base
-command to be executed will be ``python -m mybuildtool.build.source``.
+Building a source wheel is handled using two functions, ``source_metadata`` and
+``source_wheel``. These two functions can be utilized using something like::
 
-This command must support two subcommands, ``metadata`` and ``create``. Both
-of these commands must accept two positional arguments, the first of which is
-the current location of our source tree in disk, and the second of which is the
-location that we expect the command to write the data out onto disk at. Using
-the example from above, we have::
+    import email.parser
+    import os.path
+    import re
+    import tempfile
+    import zipfile
 
-    python -m mybuildtool.build.source {metadata,create} source destination
+    SOURCE = "."
+    DESTINATION_DIR = "."
 
-Using these two commands, a source wheel can be produced using::
-
-    $ python -m mybuildtool.build.source metadata . build/
-    $ python -m mybuildtool.build.source create . build/
-    $ cp ./pypa.toml build/
-    $ cd build/ && zip -r ../{name}-{verison}.src.whl ./*
-
-The assumption is that a higher level command tool (such as twine) will be
-created that encapsulates the above series of commands to make creating a
-source wheel as easy as ``twine source-wheel .``.
+    def zipdir(ziph, path):
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                filepath = os.path.join(root, file)
+                ziph.write(filepath, os.path.relpath(filepath, path))
 
 
-metadata
-````````
+    with tempfile.TemporaryDirectory() as tmpdir:
+        swhl_dir = os.path.join(tmpdir, "swhl")
+        build_dir = os.path.join(tmpdir, "build")
 
-The metadata command must produce the ``DIST-INFO/`` directory from PEP XXXX
-in the desintation directory.
+        builder.source_metadata(SOURCE, swhl_dir, build_dir=build_dir)
+        builder.source_wheel(SOURCE, swhl_dir, build_dir=build_dir)
 
-create
-``````
+        with open(os.path.join(swhl_dir, "DIST-INFO", "METADATA"), "rb") as fp:
+            metadata = email.parser.Parser().parsestr(fp.read().decode("utf8"))
 
-The create command must produce the ``SRC/`` directory from PEP XXXX in the
-destination directory. This command cannot be called on a directory that has
-not already had the metadata command called on it, and any metadata that it
-needs in the creation of the ``SRC/`` directory *MUST* come from reading the
-metadata files inside of the ``DIST-INFO/`` directory.
+        name, version = metadata["Name"], metadata["Version"]
 
+        filename = "{}-{}.swhl".format(
+            re.sub(r"[-_.]+", "-", name).lower(),
+            re.sub(r"[-_.]+", "-", version).lower(),
+        )
+        destination = os.path.join(DESTINATION_DIR, filename)
 
-Wheel Creation
-~~~~~~~~~~~~~~
-
-The wheel creation is configured by specifying a command that will be executed
-using ``python -m {command}``. Using the aboe example, the base command to be
-executed will be ``python -m mybuildtool.build.wheel``.
-
-This command must support two subcommands, ``metadata`` and ``build``. Both of
-these commands must accept two positional arguments, the first of which is the
-current location of an unpacked source wheel on disk, and the second of which
-is the location that we expect the command to write the data out onto disk at.
-Both commands must also take an option of either ``-b`` or ``--build-dir``
-which, if present, tells the build tool which directory to use as the build
-directory. Using the example froma bove, we have::
-
-    python -m mybuildtool.build.wheel {metadata,build} [-b/--build-dir build] source destination
-
-Using these two commands, a binary wheel can be produced using (roughly)::
-
-    $ unzip {name}-{version}.src.whl -d /tmp/source-wheel/
-    $ python -m mybuildtool.build.wheel metadata /tmp/source-wheel/ /tmp/wheel/
-    $ python -m mybuildtool.build.wheel build /tmp/source-wheel/ /tmp/wheel/
-    $ zip -r {name}-{version}-{tags}.whl /tmp/wheel/
-
-As with the source wheel creation, the assumption is that a higher level tool
-(such as twine) will be created that encapsulates the above commands to make
-creating a wheel as easy as ``twine wheel ./foobar-1.0.src.whl``.
+        with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as zf:
+            zipdir(zf, swhl_dir)
+            zf.write(os.path.join(SOURCE, "pypa.toml"), "pypa.toml")
 
 
-metadata
-````````
+source_metadata
+```````````````
 
-The metadata command must produce the ``{name}-{version}.dist-info/`` directory
-from PEP 427 in the destination directory. This command *MUST* produce metadata
-where any value that is present in the source wheel *MUST* be equal to the
-value that is present in the binary wheel.
+The ``source_metadata`` function's purpose is to take a directory of files and
+build the metadata for the source wheel and place it on disk. Its signature
+is::
 
 
-build
-`````
+    def source_metadata(source: str, destination: str, *, build_dir: str = None):
+        pass
 
-The build command must produce all of the non metadata files from PEP 427 in
-the destination directory. This includes copying over any ``.py`` files,
-compiling ``.c`` files into ``.so`` files, and similar. The final output of
-this command should be an unpacked, but otherwise ready to install wheel. This
-command cannot be called on a destination directory that has not already had
-the metadata command called on it, and any metadata that the build command
-needs *MUST* be read from the ``{name}-{version}.dist-info/`` directory.
+The ``source`` argument is the location on disk of the directory of files for
+which we are computing the metadata for. The ``destination`` is the directory
+where the PEP XXXX ``DIST-INFO/`` directory for the source wheel should be
+written to.
+
+
+source_wheel
+````````````
+
+The ``source_wheel`` function's purpose is to take a directory of files, and
+build the actual contents of a source wheel, sans the metadata, and place it
+on disk. Its signature is::
+
+    def source_wheel(source: str, destination: str, *, build_dir: str = None):
+        pass
+
+Much like the ``source_metadata`` function, the ``source`` argument is the
+location on disk of the directory of files that we are building the source
+wheel of and the ``destination`` argument is the directory on disk where the
+source wheel's PEP XXXX ``SRC/`` directory should be written to.
+
+This function *MUST* always be called with a ``destination`` that has already
+had the ``source_metadata`` function called on it. Implementations of this
+function *MAY* verify that the metadata is accurate but *MUST NOT* modify any
+files outside of the ``SRC/`` directory.
+
+
+Binary Wheel Creation
+~~~~~~~~~~~~~~~~~~~~~
+
+.. note::
+
+    The name "Binary" Wheel refers to the traditional ``.whl`` files and it is
+    not specific to wheels that contain compiled code.
+
+
+Similarly to building a source wheel, building a binary wheel is handled using
+two functions, ``binary_metadata`` and ``binary_wheel``. These two functions
+can be utilized using a similar chunk of code to building a source wheel.
+
+
+binary_metadata
+```````````````
+
+The ``binary_metadata`` function's purpose is to take an unpacked source wheel
+and build the metadata for the binary wheel and place it on disk. Its signature
+is::
+
+    def binary_metadata(source: str, destination: str, *, build_dir: str = None):
+        pass
+
+The ``source`` argument is the location on disk of the unpacked source wheel
+that we are building the binary wheel metadata for. The ``destination`` is the
+directory where the PEP 427 ``{name}-{version}.dist-info/`` directory must be
+written to.
+
+Any metadata that exists in the source wheel must be exactly equal when it has
+been moved into the binary wheel. It is invalid for a binary wheel to, for
+example, have a different version than the source wheel that it was created
+from.
+
+
+binary_wheel
+````````````
+
+The ``binary_wheel`` function's purpose is to take an unpacked source wheel and
+build the actual contents of the binary wheel, sans the metadata, and place it
+on disk. Its signature is::
+
+    def binary_wheel(source: str, destination: str, *, build_dir: str = None):
+        pass
+
+Much like the ``binary_metadata`` function, the ``source`` argument is the
+location on disk of the unpacked source wheel that we are building a binary
+wheel for. The ``destination`` argument is the directory on disk where the
+PEP 427 wheel contents must be written to. This will include copying over any
+``.py`` files that should be installed, compiling ``.c`` files into ``.so``
+files, etc.
+
+This function *MUST* always be called with a ``destination`` that has already
+had the ``binary_metadata`` function called on it. Implementations of this
+function *MAY* verify that the metadata is accurate but *MUST NOT* modify the
+metadata itself.
 
 
 Frequently Asked Questions
@@ -254,40 +318,12 @@ licensed, pure Python, single 2.x/3.x source libraries that projects like pip
 can use. The choice of TOML represents a pragmatic compromise.
 
 
-Why a CLI instead of a Python API?
-----------------------------------
+Why a Python API instead of a CLI Based API?
+--------------------------------------------
 
-There are two general approaches that we could take to implementing this API.
-The first is using a command line based approach, as we do now, and the second
-is a Python API based approach.
+.. note::
 
-This PEP uses a command line based approach for a few reasons:
-
-* It removes any assumption about the build tool being able to monkeypatch the
-  calling tools.
-
-* It provides a nice, clean way for a build to provide incrimental updates as
-  to the progress of the command.
-
-* The process interface is well understood and simple, which makes it easier
-  to handle than attempting to write a process shim that just calls a Python
-  API when projects like pip need to call into it.
-
-
-Why using python -m instead of a CLI?
--------------------------------------
-
-An alternate method of specifying what command to run could be to allow the
-project to execute any arbitrary command. This PEP instead chooses to have the
-specified command be a python module that can be executed using ``python -m``.
-
-Due to the nature of how the install process works, any command we're going to
-execute needs to be something that is pip installable into our current Python
-and we need a method to pass into the build tool what particular Python they
-are building for. This is largely a subjective choice, but it is the opinion of
-this PEP that by using the ``python -m`` mechanism we make it more obvious for
-build tool authors that their dependency should be pip installable, and it
-needs to be executed under the Python that we're installing into.
+    Steal the explanation from PEP 517.
 
 
 What about Editable Installs?
@@ -296,7 +332,33 @@ What about Editable Installs?
 .. note::
 
     Is this reasonable? Does our Pipeline prevent a reasonable editable
-    install? What does an editable install entail?
+    install? What does an editable install entail? Arguably breaking
+    ``pip install -e`` for projects that decide to switch to this feature is
+    a negative.
+
+    The current editable install code *typically* does an inplace build, drops
+    a .egg-info metadata into the directory and then creates a egg-link
+    (similar to a symlink). This means that for projects that are pure python,
+    you can edit your .py files and changes will be reflected immediately,
+    however for projects that have any sort of build step, it requires running
+    another inplace build to regenerate the files. In addition, if a project
+    needs to modify the .py files at all (such as with 2to3) this cannot be
+    done in place, and instead the current code builds to a build directory and
+    then uses that instead. Editable installs *also* install any scripts that
+    need to be generated as part of the installation.
+
+    In addition, editable installs currently have a problem with stale
+    metadata. If you use a system that say, uses a git derived version, then
+    it's possible that between the point that the metadata file was generated
+    during the editable install, and when the code has run, commits have
+    occured and the version has increased. This can lead to problems if the
+    software checks the version at all.
+
+    All in all, coming up with a signifcantly better editable install is
+    absolutely outside of the scope of this PEP, however trying to get
+    something similar to the status quo may not be. It comes down to whether
+    baking in a "broken" but status quo API into the pipeline API that allows
+    us to not break ``pip install -e`` is a better choice than
 
 This was mentioned earlier in the build pipeline, but this API doesn't actually
 contain any mechanism for handling an editable install. This is on purpose. The
@@ -346,9 +408,9 @@ build system directly instead of going through the ``setup.py`` shim.
 Allow replacing setup\.y invocations with something else
 -------------------------------------------------------
 
-PEP XX proposes another alternative which combines the ability to specify
-"bootstrap" dependencies in a static file and then it simply replaces the
-invocations that pip would do to ``setup.py egg_info`` and
+PEP 516 and PEP 517 propose other alternatives which combines the ability to
+specify "bootstrap" dependencies in a static file and then it simply replaces
+the invocations that pip would do to ``setup.py egg_info`` and
 ``setup.py bdist_wheel`` with another invocation.
 
 It is the opinion of this PEP that this does not go far enough in what it hopes
@@ -357,15 +419,22 @@ to accomplish, and infact it represents a regression in some forms.
 First, it does not mandate any sort of ability to create a source distribution,
 however not creating a source distribution is something that should be frowned
 upon in the general case since it prevents downstream distributors like Debian
-from being able to redistribute the code provided by that project. PEP XX
-punts on this decision since it's not strictly related to the concept of
-building, however since distutils/setuptools currently handles both situations
-you cannot replace distutils/setuptools for one part of that operation without
-also replacing it for the other, so it is the opinion of this PEP that any
-method of replacing setuptools for building wheels *must* also include a method
-for replacing setuptools for building sdists. To do otherwise would incentivize
-people to either not use the new system, or more likely, to not produce source
-distributions at all.
+from being able to redistribute the code provided by that project.
+
+PEP 516 punts on this decision since it's not strictly related to the concept
+of building, however since distutils/setuptools currently handles both
+situations you cannot replace distutils/setuptools for one part of that
+operation without also replacing it for the other, so it is the opinion of this
+PEP that any method of replacing setuptools for building wheels *must* also
+include a method for replacing setuptools for building sdists. To do otherwise
+would incentivize people to either not use the new system, or more likely, to
+not produce source distributions at all.
+
+Similarly, PEP 517 mostly punts on the issue as well, however it does define
+somewhat what a sdist is. It is the opinion of this PEP, that the sdist
+definition provided by PEP 517 conflates the idea of a sdist with the idea of
+a source tree directory (such as with a VCS) however those two items are
+similar, but different concepts.
 
 Secondly, it does not specify any particular kind of pipeline that a build must
 go through. It is the opinion of this PEP that it should. The reasons for this
